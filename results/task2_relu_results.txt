@@ -1,0 +1,10 @@
+Train size: 256 | Validation size: 256 | Test size: 10000
+Architecture channels: 64/128/256 | Parameters: 3,121,201
+Activation: RELU
+Latent: 3x4x4, strict values -1/+1 during evaluation
+Warm-up epochs: 5 | Total epochs: 250 | Best epoch: 45
+Optimizer: Adam | Initial LR: 0.001 | Final LR: 1e-05
+Scheduler: ReduceLROnPlateau(validation MSE)
+Constant validation bits: 0/48
+best_validation (epoch 45): Train MSE 0.006705, PSNR 22.08 dB | Validation MSE 0.027228, PSNR 16.29 dB | Test MSE 0.027937, PSNR 16.16 dB | Train > 25: False | Test > 25: False
+final_epoch (epoch 250): Train MSE 0.002536, PSNR 26.23 dB | Validation MSE 0.029709, PSNR 15.98 dB | Test MSE 0.030056, PSNR 15.91 dB | Train > 25: True | Test > 25: False

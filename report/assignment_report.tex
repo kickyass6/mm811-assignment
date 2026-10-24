@@ -1,0 +1,551 @@
+\documentclass[11pt]{article}
+\usepackage[margin=0.82in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{graphicx}
+% Both paths are kept so the file compiles from report/ or the repository root.
+\graphicspath{{assets/}{report/assets/}}
+\newcommand{\reportgraphic}[2][]{%
+  \IfFileExists{assets/#2}{\includegraphics[#1]{assets/#2}}{%
+    \IfFileExists{report/assets/#2}{\includegraphics[#1]{report/assets/#2}}{%
+      \fbox{\parbox[c][1.25in][c]{0.88\linewidth}{\centering\small
+      Image unavailable in sandboxed preview:\\[-0.1em]
+      \texttt{\detokenize{#2}}}}%
+    }%
+  }%
+}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\definecolor{codeblue}{RGB}{25,74,138}
+\definecolor{codegreen}{RGB}{24,115,72}
+\definecolor{codegray}{RGB}{95,99,104}
+\definecolor{lightgray}{RGB}{247,248,250}
+\hypersetup{colorlinks=true,linkcolor=codeblue,citecolor=codeblue,urlcolor=codeblue}
+\captionsetup{font=small,labelfont=bf}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.45em}
+\setlist{nosep,leftmargin=1.4em}
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{codeblue}\bfseries,
+  commentstyle=\color{codegreen},
+  stringstyle=\color{purple},
+  numbers=left,
+  numberstyle=\scriptsize\color{codegray},
+  frame=single,
+  rulecolor=\color{black!18},
+  backgroundcolor=\color{lightgray},
+  breaklines=true,
+  showstringspaces=false,
+  tabsize=4,
+  xleftmargin=1.2em,
+  framexleftmargin=1em
+}
+
+\newcommand{\pass}{\textcolor{codegreen}{\textbf{Pass}}}
+\newcommand{\partialpass}{\textcolor{orange!80!black}{\textbf{Train only}}}
+\newcommand{\notpass}{\textcolor{red!70!black}{\textbf{Not yet}}}
+\newcommand{\keydata}[1]{\textbf{#1}}
+\newcommand{\keyarch}[1]{\textcolor{codeblue}{\textbf{#1}}}
+
+\title{MM811 Programming Assignment Report}
+\author{Zhengyi Yan}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This report presents four experiments on MNIST and CIFAR-10: image classification, binary-latent reconstruction, autoregressive memorization, and latent image generation. The implementations were kept deliberately compact and were evaluated on fixed data splits. The \keyarch{MNIST classifier} obtained \keydata{92.45\% test accuracy}. The \keyarch{$3\times4\times4$ binary autoencoder} exceeded \keydata{25 dB} on its \keydata{256-image training subset} but did not generalize to the independent test set. All three \keyarch{autoregressive variants} met their memorization targets. For CIFAR-10, both \keyarch{continuous and vector-quantized autoencoders} exceeded \keydata{25 dB}. The \keyarch{absorbing-mask discrete latent diffusion model} obtained \keydata{FID 37.4657}, while the final \keyarch{continuous latent Transformer with a per-token diffusion head} obtained \keydata{FID 28.8195}; both values use \keydata{10,000 generated images} and meet the required \keydata{FID $<40$}. An independent seed reproduced the continuous result at \keydata{FID 28.8515}. The report separates reconstruction quality from generative quality and states every evaluation split explicitly.
+\end{abstract}
+
+\section{Experimental protocol}
+
+MNIST images are scaled to $[0,1]$. CIFAR-10 uses 45,000 training images, 5,000 validation images, and the official 10,000-image test set unless otherwise stated. The primary random seed is 42; Task 4.3 is independently repeated with seed 43. Models were trained with PyTorch on Apple MPS for early experiments and NVIDIA RTX 2080 SUPER GPUs for the longer CIFAR-10 runs.
+
+Classification is measured by accuracy. Reconstruction uses per-image mean squared error (MSE) and Peak Signal-to-Noise Ratio
+\begin{equation}
+    \operatorname{PSNR}(x,\hat{x})=-10\log_{10}\left(\operatorname{MSE}(x,\hat{x})\right),
+\end{equation}
+because the pixels lie in $[0,1]$. The reported PSNR is the mean of the per-image values. Image generation is evaluated with Fr\'{e}chet Inception Distance (FID) \cite{heusel2017fid}; lower is better. The assignment targets are \keydata{accuracy $>90\%$}, \keydata{PSNR $>25$ dB}, the stated memorization rates, and \keydata{FID $<40$}.
+
+\section{Task 1: MNIST image classification}
+
+\subsection{Model and training}
+
+The classifier follows the compact classroom design: \keyarch{four convolutions} reduce a $28\times28$ image to 64 features, followed by a \keyarch{three-layer classification head}. \keyarch{ReLU} is used after every hidden layer. The final layer returns ten logits, and the model is trained by cross-entropy. Only 1,024 training images and 256 validation images are used; model selection is based on validation accuracy.
+
+\begin{table}[H]
+\centering
+\caption{Task 1 network architecture.}
+\begin{tabular}{llll}
+\toprule
+Stage & Operation & Output size & Activation \\
+\midrule
+Input & MNIST image & $N\times1\times28\times28$ & -- \\
+Features & Conv $1\rightarrow8$, $4\times4$, stride 2 & $N\times8\times14\times14$ & ReLU \\
+ & Conv $8\rightarrow16$, $4\times4$, stride 2 & $N\times16\times7\times7$ & ReLU \\
+ & Conv $16\rightarrow32$, $4\times4$, stride 2 & $N\times32\times3\times3$ & ReLU \\
+ & Conv $32\rightarrow64$, $3\times3$ & $N\times64\times1\times1$ & -- \\
+Classifier & Linear $64\rightarrow128\rightarrow256\rightarrow10$ & $N\times10$ & ReLU/ReLU \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The core model is only a few lines:
+\begin{lstlisting}
+self.feats = nn.Sequential(
+    nn.Conv2d(1, 8, 4, 2, 1), nn.ReLU(),
+    nn.Conv2d(8, 16, 4, 2, 1), nn.ReLU(),
+    nn.Conv2d(16, 32, 4, 2, 1), nn.ReLU(),
+    nn.Conv2d(32, 64, 3))
+self.labs = nn.Sequential(
+    nn.Linear(64, 128), nn.ReLU(),
+    nn.Linear(128, 256), nn.ReLU(),
+    nn.Linear(256, 10))
+\end{lstlisting}
+
+Adam with learning rate $10^{-3}$, batch size 8, and 20 epochs was used. The best validation checkpoint occurred at epoch 18.
+
+\subsection{Results}
+
+The best validation accuracy was \keydata{91.41\%}, and the corresponding accuracy on all \keydata{10,000 test images} was \keydata{92.45\%}. Therefore Task 1 exceeds the required \keydata{90\% threshold}.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.58\textwidth}
+  \reportgraphic[width=\linewidth]{task1_learning_curves.png}
+  \caption{Training and validation curves from the detailed run.}
+\end{subfigure}\hfill
+\begin{subfigure}{0.38\textwidth}
+  \reportgraphic[width=\linewidth]{task1_confusion_matrix.png}
+  \caption{Test confusion matrix.}
+\end{subfigure}
+\caption{Task 1 diagnostics. The separate compact classroom implementation produced the reported \keydata{92.45\% test accuracy}.}
+\end{figure}
+
+\section{Task 2: binary latent representation}
+
+\subsection{Architecture and binarization}
+
+The \keyarch{encoder} maps an MNIST image to exactly $N\times3\times4\times4=48$ values. During evaluation every latent value is strictly $-1$ or $+1$. A \keyarch{straight-through estimator (STE)} makes the sign operation differentiable during back-propagation:
+\begin{equation}
+ z=\operatorname{sign}(a), \qquad
+ \frac{\partial z}{\partial a}\approx1.
+\end{equation}
+For the first five epochs, the hard sign is replaced by $2\sigma(10a)-1$ to provide a smooth warm-up. The remainder of training uses the \keyarch{hard STE}. The \keyarch{decoder} mirrors the encoder with transposed convolutions and ends with a sigmoid.
+
+\begin{table}[H]
+\centering
+\caption{Task 2 autoencoder.}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+Part & Main operations & Output \\
+\midrule
+Encoder & Conv $1\rightarrow64$, Conv $64\rightarrow128$ (stride 2), Conv $128\rightarrow256$ (stride 2), Linear & $N\times3\times4\times4$ \\
+Binarizer & soft warm-up, then sign with STE & values in $\{-1,+1\}$ \\
+Decoder & Linear to $256\times7\times7$, two transposed convolutions, final Conv+sigmoid & $N\times1\times28\times28$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The training loop minimizes pixel MSE with Adam. A ReduceLROnPlateau scheduler monitors hard-binary validation MSE. The final ReLU experiment used 256 training images, 256 validation images, 250 epochs, and 3,121,201 parameters.
+
+\subsection{Results and interpretation}
+
+\begin{table}[H]
+\centering
+\caption{Task 2 hard-binary results. Test evaluation uses all 10,000 official MNIST test images.}
+\begin{tabular}{lrrrr}
+\toprule
+Checkpoint & Epoch & Train PSNR & Validation PSNR & Test PSNR \\
+\midrule
+Best validation & 45 & \keydata{22.08} & \keydata{16.29} & \keydata{16.16} \\
+Final epoch & 250 & \keydata{26.23} & \keydata{15.98} & \keydata{15.91} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The training subset exceeds \keydata{25 dB}, so the implementation demonstrates that a \keyarch{48-bit bottleneck} can memorize the allowed \keydata{256-image subset}. The independent validation and test scores remain much lower. Thus the result is \partialpass{} when the assignment threshold is interpreted on the selected training subset, but it does not establish \keydata{$>25$ dB generalization}. This distinction is important because the assignment does not specify the evaluation split.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.62\textwidth}
+  \reportgraphic[width=\linewidth]{task2_history.png}
+  \caption{Training MSE and hard-binary validation PSNR.}
+\end{subfigure}\hfill
+\begin{subfigure}{0.34\textwidth}
+  \reportgraphic[width=\linewidth]{task2_reconstruction.png}
+  \caption{Test inputs (top) and reconstructions (bottom).}
+\end{subfigure}
+\caption{The widening and warm-up improve training reconstruction, while the validation curve exposes overfitting.}
+\end{figure}
+
+\section{Task 3: autoregressive memorization}
+
+\subsection{Problem definition and shared token representation}
+
+Task 3 contains three separate experiments: Sequence-to-Token, Sequence-to-Sequence, and Sequence-to-Histogram. All three model the same autoregressive factorization,
+\begin{equation}
+ p(Z)=\prod_{i=1}^{16}p(z_i\mid z_{<i}),
+\end{equation}
+but differ in how the prefix is presented and how the next-token distribution is represented. The first two experiments use 100 images, as allowed by the assignment. The histogram experiment uses 1,024 images, exceeding its 512-image requirement.
+
+The frozen Task 2 encoder first converts each MNIST image into a strict signed-binary tensor $z\in\{-1,+1\}^{3\times4\times4}$. At each of the $4\times4$ spatial locations, the three channels are converted losslessly to one decimal token:
+\begin{equation}
+ t=4b_0+2b_1+b_2, \qquad b_c=\mathbb{1}[z_c>0].
+\end{equation}
+For example, channel bits $(1,0,1)$ become token 5. Each image is therefore a length-16 sequence over $\{0,\ldots,7\}$. The inverse bit shifts recover the original 48 signed bits exactly. Two additional symbols are used internally: \texttt{BOS}=8 marks the beginning of a sequence and \texttt{PAD}=9 pads prefixes, giving an input vocabulary of size ten. The predicted output vocabulary remains the eight valid image tokens.
+
+\begin{lstlisting}
+bits = (latent > 0).long()
+tokens = bits[:, 0] * 4 + bits[:, 1] * 2 + bits[:, 2]
+tokens = tokens.flatten(1)             # [N, 16], values 0,...,7
+\end{lstlisting}
+
+For evaluation, $G$ denotes the 1,000 generated sequences and $S_{\mathrm{train}}$ is the set of complete training sequences. A sample counts as memorized only if all 16 tokens match one training sequence exactly:
+\begin{equation}
+ R_{\mathrm{mem}}=\frac{1}{|G|}\sum_{g\in G}
+ \mathbb{1}[g\in S_{\mathrm{train}}].
+\end{equation}
+This is stricter than comparing individual token accuracy or visual similarity. All neural sampling uses temperature 0.2. A low temperature is appropriate because the task explicitly measures memorization rather than sample diversity.
+
+\subsection{Task 3.1: Sequence-to-Token}
+
+\subsubsection{Input, output, and architecture}
+
+One length-16 training sequence creates 16 supervised prefix examples. At position $i$, the input is $[\mathrm{BOS},z_0,\ldots,z_{i-1}]$, padded to length 16, and the target is the single next token $z_i$. Thus 100 images produce 1,600 prefix-to-token training pairs.
+
+The model embeds each symbol into 64 dimensions and passes the prefix through a \keyarch{one-layer GRU with hidden size 128}. The hidden state at the final non-padding position is projected to \keyarch{eight logits}. This construction supports variable prefix lengths while producing exactly one categorical distribution.
+
+\begin{table}[H]
+\centering
+\caption{Sequence-to-Token architecture.}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+Stage & Operation & Output \\
+\midrule
+Input & Padded prefix with BOS and PAD symbols & $N\times16$ \\
+Embedding & Vocabulary $10\rightarrow64$ & $N\times16\times64$ \\
+Recurrent model & One-layer GRU, hidden size 128 & $N\times16\times128$ \\
+Prefix selection & Select the last valid hidden state & $N\times128$ \\
+Classifier & Linear $128\rightarrow8$ & $N\times8$ logits \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsubsection{Training and generation}
+
+The model is trained for 400 epochs with Adam, learning rate $2\times10^{-3}$, batch size 128, and cross-entropy loss
+\begin{equation}
+ \mathcal{L}_{\mathrm{S2T}}=-\log p_\theta(z_i\mid z_{<i}).
+\end{equation}
+The mean training loss decreases from 2.0920 to 0.2934. Generation begins with BOS. The GRU predicts one token, the sampled token is appended to the prefix, and the procedure repeats until 16 tokens have been produced.
+
+Among \keydata{1,000 generated sequences}, all \keydata{1,000} exactly match a training sequence. The generated set contains \keydata{70 unique sequences}. Therefore the memorization rate is \keydata{100.00\%}, exceeding the required \keydata{80\%}.
+
+\subsection{Task 3.2: Sequence-to-Sequence}
+
+\subsubsection{Input, output, and causal masking}
+
+The complete target is the original sequence $(z_0,\ldots,z_{15})$. The input is shifted right by one position:
+\begin{equation}
+ x=(\mathrm{BOS},z_0,\ldots,z_{14}),\qquad
+ y=(z_0,z_1,\ldots,z_{15}).
+\end{equation}
+A \keyarch{causal attention mask} prevents output position $i$ from reading $z_i$ or future targets. Consequently, all 16 next-token distributions are trained in one forward pass without violating the autoregressive factorization.
+
+\begin{table}[H]
+\centering
+\caption{Sequence-to-Sequence architecture.}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+Stage & Operation & Output \\
+\midrule
+Input & Right-shifted 16-token sequence & $N\times16$ \\
+Token embedding & Vocabulary $10\rightarrow128$ & $N\times16\times128$ \\
+Position embedding & 16 learned 128-D vectors, added to tokens & $N\times16\times128$ \\
+Transformer & Two causal encoder blocks, four heads, FFN width 512 & $N\times16\times128$ \\
+Output head & LayerNorm and Linear $128\rightarrow8$ & $N\times16\times8$ logits \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsubsection{Training and generation}
+
+The loss sums the token-level cross-entropies across all positions:
+\begin{equation}
+ \mathcal{L}_{\mathrm{S2S}}=-\frac{1}{16}\sum_{i=0}^{15}
+ \log p_\theta(z_i\mid z_{<i}).
+\end{equation}
+Adam with learning rate $2\times10^{-3}$ is used for 400 epochs. The training loss decreases from 2.2268 to 0.2884. Although training predicts all positions in parallel, generation remains autoregressive: after every forward pass, only the final next-token distribution is sampled and appended to the input.
+
+All \keydata{1,000 generated sequences} exactly match the training set, with \keydata{71 unique generated sequences}. The resulting \keydata{100.00\%} memorization rate exceeds the required \keydata{80\%}.
+
+\begin{figure}[H]
+\centering
+\reportgraphic[width=0.75\textwidth]{task3_history.png}
+\caption{Cross-entropy histories for the Sequence-to-Token GRU and causal Sequence-to-Sequence Transformer. Both converge rapidly on the 100-image memorization set.}
+\end{figure}
+
+\subsection{Task 3.3: Sequence-to-Histogram}
+
+\subsubsection{Histogram targets and neural predictor}
+
+For every observed prefix $u=z_{<i}$, the training data first define an eight-bin count vector:
+\begin{equation}
+ h_u(k)=\sum_{Z\in\mathcal{D}}\mathbb{1}[z_{<i}=u]\mathbb{1}[z_i=k],
+ \qquad k\in\{0,\ldots,7\}.
+\end{equation}
+The normalized next-token distribution is
+\begin{equation}
+ p(z_i=k\mid z_{<i}=u)=\frac{h_u(k)}{\sum_{j=0}^{7}h_u(j)}.
+\end{equation}
+The model processes 1,024 images, producing 16,384 prefix observations. Prefixes that are identical are merged and their normalized histograms become soft training targets. The predictor has the same compact recurrent form as the Sequence-to-Token model: a \keyarch{64-dimensional embedding}, a \keyarch{one-layer GRU with hidden size 256}, and a \keyarch{linear $256\rightarrow8$ output}. Applying softmax to its eight logits yields the predicted next-token histogram. This satisfies the requirement that the input to the network is the prior sequence and its output is a probability histogram.
+
+\begin{lstlisting}
+target = counts.float() / counts.sum()
+log_prob = log_softmax(model(prefix, prefix_length), dim=1)
+loss = -(target * log_prob).sum(dim=1).mean()
+\end{lstlisting}
+
+\subsubsection{Generation and result}
+
+Generation starts from BOS. At every position, the GRU predicts a new eight-bin histogram from the generated prefix and samples the next token; the training dictionary is not consulted during generation. Adam with learning rate $2\times10^{-3}$ is used for 50 epochs, reducing the soft-label cross-entropy from 2.0818 to 0.0640.
+
+The training data contain \keydata{1,023 unique sequences}. The neural model produces \keydata{35 unique sequences} among \keydata{1,000 samples}, of which \keydata{999} exactly occur in the training set. Its memorization rate is therefore \keydata{99.90\%}, exceeding the required \keydata{99\%} while using more than the required \keydata{512 images}.
+
+\subsection{Comparison of the three Task 3 experiments}
+
+\begin{table}[H]
+\centering
+\caption{Task 3 memorization results from 1,000 generated sequences per method.}
+\small
+\begin{tabularx}{\textwidth}{Xrrrrl}
+\toprule
+Model & Train images & Unique train & Unique generated & Match rate & Target \\
+\midrule
+\keyarch{Sequence-to-Token} & \keydata{100} & \keydata{100} & \keydata{70} & \keydata{100.00\%} & \keydata{$>80\%$} \pass \\
+\keyarch{Sequence-to-Sequence} & \keydata{100} & \keydata{100} & \keydata{71} & \keydata{100.00\%} & \keydata{$>80\%$} \pass \\
+\keyarch{Sequence-to-Histogram} & \keydata{1,024} & \keydata{1,023} & \keydata{35} & \keydata{99.90\%} & \keydata{$>99\%$} \pass \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+All three approaches satisfy their respective thresholds. The first GRU and the Transformer learn hard next-token targets from the same 100 sequences, whereas the histogram GRU learns soft empirical distributions from 1,024 sequences. Generation is autoregressive for all three methods and never retrieves a completed sequence from the training set.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.32\textwidth}
+\reportgraphic[width=\linewidth]{task3_token.png}
+\caption{Sequence-to-Token}
+\end{subfigure}\hfill
+\begin{subfigure}{0.32\textwidth}
+\reportgraphic[width=\linewidth]{task3_sequence.png}
+\caption{Sequence-to-Sequence}
+\end{subfigure}\hfill
+\begin{subfigure}{0.32\textwidth}
+\reportgraphic[width=\linewidth]{task3_histogram.png}
+\caption{Sequence-to-Histogram}
+\end{subfigure}
+\caption{Images obtained by decoding generated binary token sequences. The metric is exact sequence membership rather than visual similarity.}
+\end{figure}
+
+\section{Task 4: CIFAR-10 latent image generation}
+
+\subsection{Task 4.1: high-performance autoencoders}
+
+The \keyarch{continuous autoencoder} produces $N\times5\times8\times8$ latents. The discrete model is a \keyarch{VQ-VAE} \cite{oord2017vqvae}: its encoder produces a 10-dimensional vector at each of $8\times8$ positions, and every vector is replaced by the nearest entry in a \keyarch{512-vector codebook}. Thus the representation used by the generator is an $8\times8$ grid of integer indices in $[0,511]$, while the quantized embedding tensor is $N\times10\times8\times8$.
+
+The VQ objective is
+\begin{equation}
+ \mathcal{L}=\|x-\hat{x}\|_2^2
+ +\|\operatorname{sg}[z_e]-e\|_2^2
+ +\beta\|z_e-\operatorname{sg}[e]\|_2^2,
+\end{equation}
+where $e$ is the selected codebook vector and $\operatorname{sg}$ stops gradients. Residual blocks are used inside both encoder and decoder.
+
+\begin{table}[H]
+\centering
+\caption{Task 4.1 CIFAR-10 reconstruction results.}
+\small
+\begin{tabularx}{\textwidth}{lXrrrl}
+\toprule
+Model & Latent & Train PSNR & Val. PSNR & Test PSNR & Status \\
+\midrule
+\keyarch{Continuous AE} & $5\times8\times8$ & \keydata{30.99} & \keydata{30.25} & \keydata{30.30} & \pass \\
+\keyarch{Perceptual/noisy continuous AE} & $5\times8\times8$ & -- & \keydata{29.05} & \keydata{29.09} & \pass \\
+\keyarch{VQ-VAE} & $8\times8$ indices, embeddings $10\times8\times8$ & -- & -- & \keydata{25.24} & \pass \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The \keyarch{perceptual/noisy continuous AE} is fine-tuned for Task 4.3 with \keyarch{pixel MSE, LPIPS weight 0.08, latent $L_2$ weight $10^{-5}$, and Gaussian latent noise} at 0.1 times the channel standard deviation. It obtains \keydata{test PSNR 29.0898 dB}, \keydata{test LPIPS 0.0600}, and \keydata{reconstruction FID 11.6267}. The \keyarch{VQ-VAE} used for Task 4.2 uses \keydata{all 512 codes} on the test set and has \keydata{codebook perplexity 489.1}, indicating that the codebook did not collapse. Its \keydata{reconstruction FID is 34.6748}; reconstruction FID is a useful decoder-quality diagnostic but is not a generative FID.
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.49\textwidth}
+\reportgraphic[width=\linewidth]{task4_continuous_reconstruction.png}
+\caption{Continuous AE reconstructions.}
+\end{subfigure}\hfill
+\begin{subfigure}{0.49\textwidth}
+\reportgraphic[width=\linewidth]{task4_vqvae_reconstruction.png}
+\caption{VQ-VAE reconstructions.}
+\end{subfigure}
+\caption{CIFAR-10 inputs and reconstructions.}
+\end{figure}
+
+\subsection{Task 4.2: discrete latent diffusion}
+
+The generator operates directly on the \keyarch{VQ-VAE's $8\times8$ grid of integer indices}. A special \keyarch{[MASK] token} defines an \keyarch{absorbing discrete diffusion process with 64 noise levels}. At each training step, the selected time determines the masking ratio, and cross-entropy is evaluated only at corrupted positions. The denoiser is a \keyarch{17.80-million-parameter adaptive pre-layer-normalized Transformer} with width 320, ten blocks, eight attention heads, no dropout, exponential-moving-average weights, and time and class conditioning. Labels are randomly dropped during training to support \keyarch{classifier-free guidance}.
+
+Sampling starts from 64 [MASK] tokens and iteratively predicts and commits high-confidence codebook indices according to a \keyarch{cosine unmasking schedule}, after which the frozen VQ-VAE decoder converts the indices to RGB images. The final configuration uses 12 refinement steps, linearly increasing classifier-free guidance to 5.0, token temperature 1.1, and confidence-choice temperature 4.5. \keyarch{Horizontal flipping is applied to RGB images before VQ encoding}; this is important because flipping a flattened latent sequence would not implement the same spatial augmentation.
+
+\begin{table}[H]
+\centering
+\caption{Final Task 4.2 generation evaluations using standard \texttt{pytorch-fid} 0.3.0 with 2,048-dimensional Inception features.}
+\begin{tabularx}{\textwidth}{Xrrrl}
+\toprule
+Training configuration & Images & Final masked CE & FID & Target \\
+\midrule
+200 epochs, no augmentation & \keydata{10,000} & \keydata{5.136510} & \keydata{45.1325} & \notpass \\
+Legacy 7.13M denoiser, 230 epochs, corrected RGB flip & \keydata{10,000} & \keydata{5.380221} & \keydata{40.9662} & \notpass \\
+\keyarch{200 epochs, RGB horizontal flip} & \keydata{10,000} & \keydata{5.296559} & \keydata{37.4657} & \pass \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+All values compare \keydata{10,000 generated images} with the official \keydata{10,000-image CIFAR-10 test set} using the same standard FID implementation. Correcting the horizontal-flip procedure and extending the earlier 7.13M-parameter denoiser from 200 to 230 epochs produced \keydata{FID 40.9662}, essentially unchanged from its \keydata{40.9438 baseline}. The final \keyarch{17.80M-parameter adaptive model with RGB horizontal flipping} achieves \keydata{FID 37.4657}, beating the required threshold by \keydata{2.5343 points}. The no-augmentation ablation has a lower final cross-entropy but a worse FID, demonstrating that masked-token likelihood is only a training diagnostic and cannot replace the required image-space metric.
+
+\begin{figure}[H]
+\centering
+\reportgraphic[width=0.42\textwidth]{task4_maskgit_best.png}
+\caption{Representative samples from a discrete latent diffusion development checkpoint. The final augmented run was evaluated separately on \keydata{10,000 generated images} and obtained \keydata{FID 37.4657}.}
+\end{figure}
+
+\subsection{Task 4.3: continuous latent Transformer}
+
+The \keyarch{perceptual/noisy continuous autoencoder} maps every image to an $8\times8$ grid of five-dimensional real vectors. Clean and horizontally flipped RGB training images are encoded separately, producing 100,000 sequences of length 64. Each latent channel is standardized using training-set statistics. In accordance with the provided architecture, each cell is projected by \keyarch{$\operatorname{Linear}(5,512)$} and processed by a \keyarch{causal, pre-layer-normalized Transformer} with eight blocks, eight attention heads, feed-forward width 2,048, dropout 0.1, learned positional embeddings, and a learned beginning-of-sequence vector.
+
+An explicit \keyarch{16-component diagonal Gaussian-mixture output} initially reached only \keydata{FID 53.9985}. The final model instead uses each causal state $h_i$ to condition a \keyarch{per-token diffusion head} for the next five-dimensional cell, following the continuous-token motivation of GIVT \cite{tschannen2024givt}. The head contains \keyarch{four width-512 adaptive-layer-normalized MLP blocks and a 1,000-step cosine noise schedule}. For clean cell $z_i$, noise $\epsilon$, and cumulative signal level $\bar\alpha_t$, training uses
+\begin{align}
+ z_{i,t} &= \sqrt{\bar\alpha_t}\,z_i+\sqrt{1-\bar\alpha_t}\,\epsilon, \\
+ \mathcal{L}_{\mathrm{diff}} &= \left\|\epsilon-\epsilon_\theta(z_{i,t},t,h_i)\right\|_2^2.
+\end{align}
+Four noise draws are used per token and \keyarch{exponential-moving-average weights} with decay 0.999 are retained. The complete \keyarch{Transformer and diffusion head} contain \keydata{37,995,013 trainable parameters}.
+
+Generation remains \keyarch{autoregressive across the 64 raster-ordered cells}. For each cell, the \keyarch{diffusion head} performs 50 stochastic denoising steps with $\eta=1$, temperature 1.0, and normalized-latent clipping at 6.0; the frozen decoder then maps the completed $5\times8\times8$ latent to RGB. Both runs use 50 epochs and select the EMA checkpoint with the lowest validation noise MSE. Seed 42 selects \keydata{epoch 16 at 0.408118}, while seed 43 selects \keydata{epoch 16 at 0.407760}.
+
+\begin{table}[H]
+\centering
+\caption{Task 4.3 standard generation evaluations. Every FID uses 10,000 generated images against the official 10,000-image CIFAR-10 test set.}
+\begin{tabularx}{\textwidth}{Xrrrrl}
+\toprule
+Output distribution & Seed & Epochs & Parameters & FID & Target \\
+\midrule
+\keyarch{16-component diagonal GMM} & 42 & 200 & \keydata{6.38M} & \keydata{53.9985} & \notpass \\
+\keyarch{Per-token diffusion head} & 42 & 50 & \keydata{38.00M} & \keydata{28.8515} & \pass \\
+\keyarch{Per-token diffusion head} & 43 & 50 & \keydata{38.00M} & \keydata{28.8195} & \pass \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The two independent final FIDs differ by only \keydata{0.0320}, providing evidence that the improvement is reproducible rather than a favorable single seed. The better seed-43 result beats the assignment threshold by \keydata{11.1805 FID points}. The result also shows why likelihood-style diagnostics alone are insufficient: the decoder's perceptual quality and tolerance to imperfect latent samples were important to image-space FID.
+
+\begin{figure}[H]
+\centering
+\reportgraphic[width=0.58\textwidth]{task4_continuous_generation.png}
+\caption{Samples from the seed-43 continuous latent Transformer with a per-token diffusion head. The standard \keydata{10,000-image evaluation} obtained \keydata{FID 28.8195}; seed 42 independently obtained \keydata{FID 28.8515}.}
+\end{figure}
+
+\section{Summary and limitations}
+
+\begin{table}[H]
+\centering
+\caption{Comparison with the assignment thresholds.}
+\begin{tabularx}{\textwidth}{lXl}
+\toprule
+Task & Best verified result & Status \\
+\midrule
+1 & \keydata{MNIST test accuracy 92.45\% ($>90\%$)} & \pass \\
+2 & \keydata{256-image train PSNR 26.23 dB; test PSNR 15.91 dB} & \partialpass \\
+3 & \keydata{100\%, 100\%, and 99.90\% exact memorization} & \pass \\
+4.1 continuous & \keydata{Best test PSNR 30.30 dB; generator AE 29.09 dB; latent $5\times8\times8$} & \pass \\
+4.1 discrete & \keydata{Test PSNR 25.24 dB, latent $8\times8$ indices with 10-D code vectors} & \pass \\
+4.2 & \keydata{FID 37.4657 (10,000 images); target $<40$} & \pass \\
+4.3 & \keydata{FID 28.8195 (seed 43) and 28.8515 (seed 42), 10,000 images} & \pass \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The experiments demonstrate the required architectures and leave Task 2 generalization through an extreme \keyarch{48-bit code} as the principal limitation. Task 4.2 meets the generation target through \keyarch{absorbing-mask diffusion, spatially correct augmentation, EMA, and iterative guidance}. Task 4.3 also meets the target: \keyarch{perceptual/noisy autoencoder training} lowers the decoder's reconstruction floor, while a \keyarch{conditional per-token diffusion head} models the multimodal distribution of each continuous latent cell more effectively than an explicit Gaussian mixture. Independent seeds reproduce essentially the same FID. Throughout the report, training loss, reconstruction metrics, and generative FID remain separate because only the required image-space evaluation establishes generation quality.
+
+\section*{Reproducibility}
+
+Each stage is implemented in a separate, compact source file:
+\begin{center}
+\small
+\begin{tabularx}{0.94\textwidth}{l>{\raggedright\arraybackslash}X}
+\toprule
+Task & Source file \\
+\midrule
+1 & \texttt{task1\_classroom.py} \\
+2 & \texttt{task2\_optimized.py} \\
+3 & \texttt{task3\_autoregressive.py} \\
+4.1 & \texttt{task4\_autoencoders.py}, \texttt{task4\_vqvae\_masked.py} \\
+4.2 & \texttt{task4\_vq\_diffusion\_final.py} \\
+4.3 & \texttt{task4\_continuous\_ae\_perceptual.py}, \texttt{task4\_continuous\_token\_diffusion.py} \\
+Evaluation & \texttt{task4\_fid\_standard.py} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+Representative commands are:
+
+\begin{lstlisting}[language=bash,numbers=none,basicstyle=\ttfamily\scriptsize]
+python task1_classroom.py
+python task2_optimized.py --activation relu
+python task3_autoregressive.py --generate 1000
+python task4_autoencoders.py --epochs 100
+python task4_vqvae_masked.py --epochs 150
+python task4_vq_diffusion_final.py --vqvae <vqvae.pt> --epochs 200 --augmentation pixel-flip --generate 10000
+python task4_continuous_ae_perceptual.py --init-ae <continuous.pt> --epochs 30 --lpips-weight 0.08 --latent-noise 0.1
+python task4_continuous_token_diffusion.py --autoencoder <autoencoder.pt> --epochs 50 --augmentation pixel-flip --sample-steps 50 --generate 10000
+python task4_fid_standard.py <generated_images.pt> --images 10000
+\end{lstlisting}
+
+\begin{thebibliography}{9}
+\bibitem{oord2017vqvae}
+A. van den Oord, O. Vinyals, and K. Kavukcuoglu,
+``Neural Discrete Representation Learning,''
+\emph{Advances in Neural Information Processing Systems}, 2017.
+
+\bibitem{chang2022maskgit}
+H. Chang, H. Zhang, L. Jiang, C. Liu, and W. T. Freeman,
+``MaskGIT: Masked Generative Image Transformer,''
+\emph{IEEE/CVF Conference on Computer Vision and Pattern Recognition}, 2022.
+
+\bibitem{tschannen2024givt}
+M. Tschannen, C. Eastwood, and F. Mentzer,
+``GIVT: Generative Infinite-Vocabulary Transformers,''
+\emph{European Conference on Computer Vision}, 2024.
+
+\bibitem{heusel2017fid}
+M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter,
+``GANs Trained by a Two Time-Scale Update Rule Converge to a Local Nash Equilibrium,''
+\emph{Advances in Neural Information Processing Systems}, 2017.
+\end{thebibliography}
+
+\end{document}
